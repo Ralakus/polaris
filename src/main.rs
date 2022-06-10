@@ -1,4 +1,5 @@
 use clap::Parser;
+use percent_encoding::{AsciiSet, CONTROLS};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -37,6 +38,10 @@ struct Args {
     /// TLS key file
     #[clap(long, short = 'k')]
     key: String,
+
+    /// Static file directory
+    #[clap(long, short = 'd')]
+    data: String,
 }
 
 #[tokio::main]
@@ -44,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     let listener = TcpListener::bind(args.addr)
         .await
-        .expect("Failed to start TCP listener");
+        .expect("failed to start tcp listener");
 
     // Build TLS configuration.
     let tls_cfg = {
@@ -60,6 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .expect("failed to generate tls config");
         std::sync::Arc::new(cfg)
     };
+
+    std::env::set_current_dir(args.data.clone()).expect("failed to set work dir");
+    const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
     loop {
         let (socket, _) = listener.accept().await?;
@@ -131,28 +139,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             };
 
-            let response = match uri.path_segments().map(|path| path.collect::<Vec<_>>()) {
-                Some(path) if path.iter().next().map_or(false, |val| val == &"echo") => {
-                    match uri.query() {
-                        Some(query) => Response {
-                            status: status::Code::Success,
-                            meta: String::from("text/plain"),
-                            body: format!(
-                                "{}\r\n",
-                                percent_encoding::percent_decode_str(query).decode_utf8_lossy()
-                            ),
-                        },
-                        None => Response {
-                            status: status::Code::Input,
-                            meta: String::from("Please enter some text"),
-                            body: String::default(),
-                        },
-                    }
-                }
+            let path = format!(
+                ".{}",
+                percent_encoding::percent_decode_str(uri.path()).decode_utf8_lossy()
+            );
+
+            let response = match std::fs::metadata(path.clone()) {
+                Ok(dir) if dir.is_dir() => match std::fs::read_dir(path.clone()) {
+                    Ok(dir) => Response {
+                        status: status::Code::Success,
+                        meta: String::from("text/gemini"),
+                        body: dir
+                            .filter_map(|entry| {
+                                entry.map_or(None, |entry| {
+                                    entry
+                                        .path()
+                                        .file_name()
+                                        .map_or(None, |path| path.to_str())
+                                        .map(|path| {
+                                            (entry.path().display().to_string(), path.to_string())
+                                        })
+                                })
+                            })
+                            .map(|(full, entry)| {
+                                format!(
+                                    "=> /{} {}\n",
+                                    percent_encoding::utf8_percent_encode(&full, FRAGMENT),
+                                    entry
+                                )
+                            })
+                            .collect(),
+                    },
+                    Err(e) => Response {
+                        status: status::Code::CgiError,
+                        meta: format!("Failed to generate directory list : {}", e),
+                        body: String::default(),
+                    },
+                },
+                Ok(file) if file.is_file() => match std::fs::read_to_string(path.clone()) {
+                    Ok(body) => Response {
+                        status: status::Code::Success,
+                        meta: String::from("text/gemini"),
+                        body,
+                    },
+                    Err(e) => Response {
+                        status: status::Code::CgiError,
+                        meta: format!("Failed to read file : {}", e),
+                        body: String::default(),
+                    },
+                },
                 _ => Response {
-                    status: status::Code::Success,
-                    meta: String::from("text/gemini"),
-                    body: String::from("Please go to echo path for test.\n=> echo"),
+                    status: status::Code::NotFound,
+                    meta: String::from("Path not found"),
+                    body: String::default(),
                 },
             };
 
