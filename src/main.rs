@@ -71,10 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     loop {
         let (socket, _) = listener.accept().await?;
-        let mut acceptor = TlsAcceptor::from(tls_cfg.clone())
-            .accept(socket)
-            .await
-            .expect("failed to accept tls connection");
+        let mut acceptor = match TlsAcceptor::from(tls_cfg.clone()).accept(socket).await {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Failed to accept TLS connection : {}", e);
+                continue;
+            }
+        };
 
         tokio::spawn(async move {
             let mut uri_buffer = [0; 2048];
@@ -149,26 +152,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Ok(dir) => Response {
                         status: status::Code::Success,
                         meta: String::from("text/gemini"),
-                        body: dir
-                            .filter_map(|entry| {
-                                entry.map_or(None, |entry| {
-                                    entry
-                                        .path()
-                                        .file_name()
-                                        .map_or(None, |path| path.to_str())
-                                        .map(|path| {
-                                            (entry.path().display().to_string(), path.to_string())
-                                        })
+                        body: {
+                            let mut links: Vec<String> = dir
+                                .filter_map(|entry| {
+                                    entry.map_or(None, |entry| {
+                                        entry
+                                            .path()
+                                            .file_name()
+                                            .map_or(None, |path| path.to_str())
+                                            .map(|path| {
+                                                (
+                                                    entry.path().display().to_string(),
+                                                    path.to_string(),
+                                                )
+                                            })
+                                    })
                                 })
-                            })
-                            .map(|(full, entry)| {
-                                format!(
-                                    "=> /{} {}\n",
-                                    percent_encoding::utf8_percent_encode(&full, FRAGMENT),
-                                    entry
-                                )
-                            })
-                            .collect(),
+                                .map(|(full, entry)| {
+                                    format!(
+                                        "=> /{} {}\n",
+                                        percent_encoding::utf8_percent_encode(&full, FRAGMENT),
+                                        entry
+                                    )
+                                })
+                                .collect();
+
+                            links.sort();
+
+                            let body: String = links.iter().rev().map(String::from).collect();
+
+                            format!(
+                                "{}\n### Path: [ {} ]\n{}\n{}",
+                                include_str!("header.gmi"),
+                                path,
+                                body,
+                                include_str!("footer.gmi")
+                            )
+                        },
                     },
                     Err(e) => Response {
                         status: status::Code::CgiError,
@@ -180,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Ok(body) => Response {
                         status: status::Code::Success,
                         meta: String::from("text/gemini"),
-                        body,
+                        body: format!("{}\n{}", body, include_str!("footer.gmi")),
                     },
                     Err(e) => Response {
                         status: status::Code::CgiError,

@@ -2,3 +2,6 @@
 /.vscode
 *.key
 *.cert
+data
+src/footer.gmi
+src/header.gmi
