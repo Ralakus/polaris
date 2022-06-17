@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, addr) = listener.accept().await?;
         let mut acceptor = match TlsAcceptor::from(tls_cfg.clone()).accept(socket).await {
             Ok(a) => a,
             Err(e) => {
@@ -146,6 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ".{}",
                 percent_encoding::percent_decode_str(uri.path()).decode_utf8_lossy()
             );
+
+            println!("{} accessing {}", addr, path);
 
             let response = match std::fs::metadata(path.clone()) {
                 Ok(dir) if dir.is_dir() => match std::fs::read_dir(path.clone()) {
