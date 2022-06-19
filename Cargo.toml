@@ -7,6 +7,10 @@ edition = "2021"
 
 [dependencies]
 clap =  { version = "3", features = ["derive"] }
+env_logger = "0.9"
+log = "0.4"
+mime = "0.3"
+mime_guess = "2"
 percent-encoding = "2"
 rustls = "0.20"
 rustls-pemfile = "1"

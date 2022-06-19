@@ -4,26 +4,29 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-pub mod status;
+pub mod response;
+use response::Response;
 
-#[derive(Clone, Debug)]
-pub struct Response {
-    pub status: status::Code,
-    pub meta: String,
-    pub body: String,
-}
-
-impl std::fmt::Display for Response {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}\r\n{}", self.status as u8, self.meta, self.body)
-    }
-}
-
-impl Response {
-    pub fn new(status: status::Code, meta: String, body: String) -> Self {
-        Self { status, meta, body }
-    }
-}
+/// URL percent encoding/decoding ascii set
+const URL_PERCENT_ENCODING: &AsciiSet = &CONTROLS
+    .add(b':')
+    .add(b'/')
+    .add(b'?')
+    .add(b'#')
+    .add(b'[')
+    .add(b']')
+    .add(b'@')
+    .add(b'!')
+    .add(b'$')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b';')
+    .add(b'=');
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -51,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await
         .expect("failed to start tcp listener");
 
+    env_logger::init();
+
     // Build TLS configuration.
     let tls_cfg = {
         // Load public certificate.
@@ -67,158 +72,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     std::env::set_current_dir(args.data.clone()).expect("failed to set work dir");
-    const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
 
     loop {
         let (socket, addr) = listener.accept().await?;
-        let mut acceptor = match TlsAcceptor::from(tls_cfg.clone()).accept(socket).await {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("Failed to accept TLS connection : {}", e);
-                continue;
-            }
-        };
+        let tls_cfg = tls_cfg.clone();
 
         tokio::spawn(async move {
-            let mut uri_buffer = [0; 2048];
-            match acceptor.read(&mut uri_buffer).await {
-                Ok(bytes_read) => {
-                    if bytes_read > 1024 {
-                        let response = Response {
-                            status: status::Code::BadRequest,
-                            meta: String::from("URI exceeds 1024 bytes"),
-                            body: String::default(),
-                        };
-                        if let Err(e) = acceptor.write(response.to_string().as_bytes()).await {
-                            eprintln!("Failed to send bad URI error to client : {}", e);
+            let mut acceptor = match TlsAcceptor::from(tls_cfg).accept(socket).await {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("Failed to accept TLS connection : {}", e);
+                    return;
+                }
+            };
+
+            let mut url_buffer = [0; 2048];
+            let url_result = acceptor.read(&mut url_buffer).await;
+            let closure = || async move {
+                match url_result {
+                    Ok(byte_count) => {
+                        if byte_count > 1024 {
+                            return Response::BadRequest("url exceeds 1024 bytes".into());
                         }
-                        return;
                     }
-                }
-                Err(e) => {
-                    let response = Response {
-                        status: status::Code::BadRequest,
-                        meta: format!("Failed to recieve URI : {}", e),
-                        body: String::default(),
-                    };
-                    if let Err(e) = acceptor.write(response.to_string().as_bytes()).await {
-                        eprintln!("Failed to send bad URI error to client : {}", e);
+                    Err(e) => return Response::BadRequest(format!("Failed to get url : {} ", e)),
+                };
+
+                let url_string = match std::str::from_utf8(&url_buffer) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        return Response::BadRequest(format!("url is not valid UTF-8 : {}", e))
                     }
-                    return;
-                }
-            }
+                };
 
-            let uri_string = match std::str::from_utf8(&uri_buffer) {
-                Ok(uri) => uri,
-                Err(e) => {
-                    let response = Response {
-                        status: status::Code::BadRequest,
-                        meta: format!("URI is not valid UTF-8 : {}", e),
-                        body: String::default(),
-                    };
+                let url = match url::Url::parse(url_string) {
+                    Ok(url) => url,
+                    Err(e) => return Response::BadRequest(format!("url is valid : {}", e)),
+                };
 
-                    if let Err(e) = acceptor.write(response.to_string().as_bytes()).await {
-                        eprintln!("Failed to send non UTF-8 URI error to client : {}", e);
-                    }
-
-                    return;
-                }
+                log::info!("{} accesing {}", addr, url_string);
+                process_request(url).await
             };
 
-            let uri = match url::Url::parse(uri_string) {
-                Ok(uri) => uri,
-                Err(e) => {
-                    let response = Response {
-                        status: status::Code::BadRequest,
-                        meta: format!("URI is valid URI format : {}", e),
-                        body: String::default(),
-                    };
-
-                    if let Err(e) = acceptor.write(response.to_string().as_bytes()).await {
-                        eprintln!("Failed to send invalid URI error to client : {}", e);
-                    }
-
-                    return;
-                }
-            };
-
-            let path = format!(
-                ".{}",
-                percent_encoding::percent_decode_str(uri.path()).decode_utf8_lossy()
-            );
-
-            println!("{} accessing {}", addr, path);
-
-            let response = match std::fs::metadata(path.clone()) {
-                Ok(dir) if dir.is_dir() => match std::fs::read_dir(path.clone()) {
-                    Ok(dir) => Response {
-                        status: status::Code::Success,
-                        meta: String::from("text/gemini"),
-                        body: {
-                            let mut links: Vec<String> = dir
-                                .filter_map(|entry| {
-                                    entry.map_or(None, |entry| {
-                                        entry
-                                            .path()
-                                            .file_name()
-                                            .map_or(None, |path| path.to_str())
-                                            .map(|path| {
-                                                (
-                                                    entry.path().display().to_string(),
-                                                    path.to_string(),
-                                                )
-                                            })
-                                    })
-                                })
-                                .map(|(full, entry)| {
-                                    format!(
-                                        "=> /{} {}\n",
-                                        percent_encoding::utf8_percent_encode(&full, FRAGMENT),
-                                        entry
-                                    )
-                                })
-                                .collect();
-
-                            links.sort();
-
-                            let body: String = links.iter().rev().map(String::from).collect();
-
-                            format!(
-                                "{}\n### Path: [ {} ]\n{}\n{}",
-                                include_str!("header.gmi"),
-                                path,
-                                body,
-                                include_str!("footer.gmi")
-                            )
-                        },
-                    },
-                    Err(e) => Response {
-                        status: status::Code::CgiError,
-                        meta: format!("Failed to generate directory list : {}", e),
-                        body: String::default(),
-                    },
-                },
-                Ok(file) if file.is_file() => match std::fs::read_to_string(path.clone()) {
-                    Ok(body) => Response {
-                        status: status::Code::Success,
-                        meta: String::from("text/gemini"),
-                        body: format!("{}\n{}", body, include_str!("footer.gmi")),
-                    },
-                    Err(e) => Response {
-                        status: status::Code::CgiError,
-                        meta: format!("Failed to read file : {}", e),
-                        body: String::default(),
-                    },
-                },
-                _ => Response {
-                    status: status::Code::NotFound,
-                    meta: String::from("Path not found"),
-                    body: String::default(),
-                },
-            };
-
-            if let Err(e) = acceptor.write(response.to_string().as_bytes()).await {
-                eprintln!("Failed to send response to client : {}", e);
+            if let Err(e) = acceptor.write(&closure().await.as_bytes()).await {
+                log::error!("Failed to send response to client : {}", e);
             }
         });
     }
@@ -248,4 +145,78 @@ fn load_private_key(filename: &str) -> rustls::PrivateKey {
     }
 
     rustls::PrivateKey(keys[0].clone())
+}
+
+/// Server response code
+async fn process_request(url: url::Url) -> Response {
+    let url_path = percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
+    let fs_path = format!(".{}", url_path);
+
+    if url_path == "/robots.txt" {
+        return match std::fs::read(".robots.txt") {
+            Ok(bytes) => Response::Success("text/plain".into(), bytes),
+            Err(_) => Response::Success("text/plain".into(), "".into()),
+        };
+    }
+
+    let header = std::fs::read_to_string(".header.gmi").unwrap_or_default();
+    let footer = std::fs::read_to_string(".footer.gmi").unwrap_or_default();
+
+    match std::fs::metadata(fs_path.clone()) {
+        Ok(dir) if dir.is_dir() => match std::fs::read_dir(fs_path.clone()) {
+            Ok(dir) => {
+                let mut links: Vec<String> = dir
+                    .filter_map(|dir_entry| {
+                        dir_entry.map_or(None, |entry| {
+                            entry
+                                .path()
+                                .file_name()
+                                .map_or(None, |file_name| file_name.to_str())
+                                .map_or(None, |file_name| {
+                                    if file_name.starts_with('.') {
+                                        None
+                                    } else {
+                                        Some(file_name)
+                                    }
+                                })
+                                .map(|file_name| {
+                                    (entry.path().display().to_string(), file_name.to_string())
+                                })
+                        })
+                    })
+                    .map(|(full, entry)| {
+                        format!(
+                            "=> /{} {}\n",
+                            percent_encoding::utf8_percent_encode(&full, URL_PERCENT_ENCODING),
+                            entry
+                        )
+                    })
+                    .collect();
+
+                links.sort();
+
+                let content: String = links.iter().rev().map(String::from).collect();
+                let body = format!(
+                    "{}\n### Path: [ {} ]\n{}\n{}",
+                    header, url_path, content, footer,
+                )
+                .into_bytes();
+
+                Response::Success("text/gemini".into(), body)
+            }
+            Err(e) => Response::CgiError(format!("Failed to generate directory list : {}", e)),
+        },
+        Ok(file) if file.is_file() => match std::fs::read(fs_path.clone()) {
+            Ok(bytes) => {
+                let default_mime: mime::Mime = "text/gemini".parse().unwrap();
+                let mime = mime_guess::from_path(fs_path.clone())
+                    .first()
+                    .unwrap_or(default_mime.clone());
+
+                Response::Success(format!("{}", mime), bytes)
+            }
+            Err(e) => Response::CgiError(format!("Failed to read file : {}", e)),
+        },
+        _ => Response::NotFound("Not found".into()),
+    }
 }
