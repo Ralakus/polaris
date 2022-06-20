@@ -165,7 +165,7 @@ async fn process_request(url: url::Url) -> Response {
         path => path,
     };
 
-    if path == "/robots.txt" {
+    if path == "robots.txt" {
         return match std::fs::read(".robots.txt") {
             Ok(bytes) => Response::Success("text/plain".into(), bytes),
             Err(_) => Response::Success("text/plain".into(), "".into()),
