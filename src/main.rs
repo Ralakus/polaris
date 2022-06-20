@@ -88,9 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             };
 
             let mut url_buffer = [0; 2048];
-            let mut byte_count = 0;
             let url_result = acceptor.read(&mut url_buffer).await;
-            let closure = || async {
+            let closure = || async move {
+                let byte_count;
                 match url_result {
                     Ok(bytes_read) => {
                         byte_count = bytes_read;
