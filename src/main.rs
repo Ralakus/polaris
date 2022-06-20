@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut acceptor = match TlsAcceptor::from(tls_cfg).accept(socket).await {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("Failed to accept TLS connection : {}", e);
+                    log::error!("Failed to accept TLS connection : {}", e);
                     return;
                 }
             };
@@ -95,22 +95,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Ok(bytes_read) => {
                         byte_count = bytes_read;
                         if byte_count > 1024 {
-                            return Response::BadRequest("url exceeds 1024 bytes".into());
+                            return Response::BadRequest("URL exceeds 1024 bytes".into());
                         }
                     }
-                    Err(e) => return Response::BadRequest(format!("Failed to get url : {} ", e)),
+                    Err(e) => return Response::BadRequest(format!("Failed to get URL : {} ", e)),
                 };
 
                 let url_string = match std::str::from_utf8(&url_buffer[..byte_count]) {
                     Ok(url) => url,
                     Err(e) => {
-                        return Response::BadRequest(format!("url is not valid UTF-8 : {}", e))
+                        return Response::BadRequest(format!("URL is not valid UTF-8 : {}", e))
                     }
                 };
 
                 let url = match url::Url::parse(url_string) {
                     Ok(url) => url,
-                    Err(e) => return Response::BadRequest(format!("url is valid : {}", e)),
+                    Err(e) => return Response::BadRequest(format!("URL is valid : {}", e)),
                 };
 
                 log::info!(
