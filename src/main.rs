@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 };
 
                 log::info!(
-                    "{} accesing {:?}",
+                    "[{}] => {}",
                     addr,
                     url_string.strip_suffix("\r\n").unwrap_or(url_string).trim()
                 );
