@@ -9,8 +9,9 @@ use response::Response;
 
 /// URL percent encoding/decoding ascii set
 const URL_PERCENT_ENCODING: &AsciiSet = &CONTROLS
+    .add(b' ')
     .add(b':')
-    .add(b'/')
+    //.add(b'/') Commented out due to wierd generated links and isn't a valid character for file names anyways
     .add(b'?')
     .add(b'#')
     .add(b'[')
@@ -87,10 +88,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             };
 
             let mut url_buffer = [0; 2048];
+            let mut byte_count = 0;
             let url_result = acceptor.read(&mut url_buffer).await;
-            let closure = || async move {
+            let closure = || async {
                 match url_result {
-                    Ok(byte_count) => {
+                    Ok(bytes_read) => {
+                        byte_count = bytes_read;
                         if byte_count > 1024 {
                             return Response::BadRequest("url exceeds 1024 bytes".into());
                         }
@@ -98,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Err(e) => return Response::BadRequest(format!("Failed to get url : {} ", e)),
                 };
 
-                let url_string = match std::str::from_utf8(&url_buffer) {
+                let url_string = match std::str::from_utf8(&url_buffer[..byte_count]) {
                     Ok(url) => url,
                     Err(e) => {
                         return Response::BadRequest(format!("url is not valid UTF-8 : {}", e))
@@ -110,7 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Err(e) => return Response::BadRequest(format!("url is valid : {}", e)),
                 };
 
-                log::info!("{} accesing {}", addr, url_string);
+                log::info!(
+                    "{} accesing {:?}",
+                    addr,
+                    url_string.strip_suffix("\r\n").unwrap_or(url_string).trim()
+                );
                 process_request(url).await
             };
 
@@ -149,10 +156,16 @@ fn load_private_key(filename: &str) -> rustls::PrivateKey {
 
 /// Server response code
 async fn process_request(url: url::Url) -> Response {
-    let url_path = percent_encoding::percent_decode_str(url.path()).decode_utf8_lossy();
-    let fs_path = format!(".{}", url_path);
+    let path = match percent_encoding::percent_decode_str(url.path())
+        .decode_utf8_lossy()
+        .to_string()
+    {
+        path if path == "/" || path.is_empty() => ".".to_string(),
+        path if path.starts_with('/') => path[1..].to_string(),
+        path => path,
+    };
 
-    if url_path == "/robots.txt" {
+    if path == "/robots.txt" {
         return match std::fs::read(".robots.txt") {
             Ok(bytes) => Response::Success("text/plain".into(), bytes),
             Err(_) => Response::Success("text/plain".into(), "".into()),
@@ -162,33 +175,29 @@ async fn process_request(url: url::Url) -> Response {
     let header = std::fs::read_to_string(".header.gmi").unwrap_or_default();
     let footer = std::fs::read_to_string(".footer.gmi").unwrap_or_default();
 
-    match std::fs::metadata(fs_path.clone()) {
-        Ok(dir) if dir.is_dir() => match std::fs::read_dir(fs_path.clone()) {
+    match std::fs::metadata(path.clone()) {
+        Ok(dir) if dir.is_dir() => match std::fs::read_dir(path.clone()) {
             Ok(dir) => {
                 let mut links: Vec<String> = dir
-                    .filter_map(|dir_entry| {
-                        dir_entry.map_or(None, |entry| {
-                            entry
-                                .path()
-                                .file_name()
-                                .map_or(None, |file_name| file_name.to_str())
-                                .map_or(None, |file_name| {
-                                    if file_name.starts_with('.') {
-                                        None
-                                    } else {
-                                        Some(file_name)
-                                    }
-                                })
-                                .map(|file_name| {
-                                    (entry.path().display().to_string(), file_name.to_string())
-                                })
-                        })
+                    .filter_map(|dir_entry| dir_entry.ok())
+                    .filter_map(|dir_entry| dir_entry.path().to_str().map(ToString::to_string))
+                    .filter_map(|path| {
+                        path.split('/')
+                            .last()
+                            .map(|path_ref| (path.clone(), path_ref.to_string()))
                     })
-                    .map(|(full, entry)| {
+                    .filter_map(|(path, name)| {
+                        if name.starts_with('.') {
+                            None
+                        } else {
+                            Some((path, name))
+                        }
+                    })
+                    .map(|(path, name)| {
                         format!(
-                            "=> /{} {}\n",
-                            percent_encoding::utf8_percent_encode(&full, URL_PERCENT_ENCODING),
-                            entry
+                            "=> {} {}\n",
+                            percent_encoding::utf8_percent_encode(&path, URL_PERCENT_ENCODING),
+                            name
                         )
                     })
                     .collect();
@@ -198,7 +207,7 @@ async fn process_request(url: url::Url) -> Response {
                 let content: String = links.iter().rev().map(String::from).collect();
                 let body = format!(
                     "{}\n### Path: [ {} ]\n{}\n{}",
-                    header, url_path, content, footer,
+                    header, path, content, footer,
                 )
                 .into_bytes();
 
@@ -206,10 +215,10 @@ async fn process_request(url: url::Url) -> Response {
             }
             Err(e) => Response::CgiError(format!("Failed to generate directory list : {}", e)),
         },
-        Ok(file) if file.is_file() => match std::fs::read(fs_path.clone()) {
+        Ok(file) if file.is_file() => match std::fs::read(path.clone()) {
             Ok(bytes) => {
                 let default_mime: mime::Mime = "text/gemini".parse().unwrap();
-                let mime = mime_guess::from_path(fs_path.clone())
+                let mime = mime_guess::from_path(path.clone())
                     .first()
                     .unwrap_or(default_mime.clone());
 
