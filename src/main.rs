@@ -222,7 +222,13 @@ async fn process_request(url: url::Url) -> Response {
                     .first()
                     .unwrap_or(default_mime.clone());
 
-                Response::Success(format!("{}", mime), bytes)
+                let mut body = bytes;
+                if mime == default_mime {
+                    body.push(b'\n');
+                    body.extend_from_slice(footer.as_bytes());
+                }
+
+                Response::Success(format!("{}", mime), body)
             }
             Err(e) => Response::CgiError(format!("Failed to read file : {}", e)),
         },
