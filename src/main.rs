@@ -216,19 +216,18 @@ async fn process_request(url: url::Url) -> Response {
             Err(e) => Response::CgiError(format!("Failed to generate directory list : {}", e)),
         },
         Ok(file) if file.is_file() => match std::fs::read(path.clone()) {
-            Ok(bytes) => {
+            Ok(mut bytes) => {
                 let default_mime: mime::Mime = "text/gemini".parse().unwrap();
                 let mime = mime_guess::from_path(path.clone())
                     .first()
                     .unwrap_or(default_mime.clone());
 
-                let mut body = bytes;
                 if mime == default_mime {
-                    body.push(b'\n');
-                    body.extend_from_slice(footer.as_bytes());
+                    bytes.push(b'\n');
+                    bytes.extend_from_slice(footer.as_bytes());
                 }
 
-                Response::Success(format!("{}", mime), body)
+                Response::Success(format!("{}", mime), bytes)
             }
             Err(e) => Response::CgiError(format!("Failed to read file : {}", e)),
         },
