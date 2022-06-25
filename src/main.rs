@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut acceptor = match TlsAcceptor::from(tls_cfg).accept(socket).await {
                 Ok(a) => a,
                 Err(e) => {
-                    log::error!("Failed to accept TLS connection : {}", e);
+                    log::error!("Failed to accept TLS connection from {} : {}", addr, e);
                     return;
                 }
             };
