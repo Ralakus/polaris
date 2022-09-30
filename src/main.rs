@@ -1,3 +1,5 @@
+#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+
 use clap::Parser;
 use percent_encoding::{AsciiSet, CONTROLS};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -118,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     addr,
                     url_string.strip_suffix("\r\n").unwrap_or(url_string).trim()
                 );
-                process_request(url).await
+                process_request(&url)
             };
 
             if let Err(e) = acceptor.write(&closure().await.as_bytes()).await {
@@ -147,15 +149,13 @@ fn load_private_key(filename: &str) -> rustls::PrivateKey {
 
     // Load and return a single private key.
     let keys = rustls_pemfile::rsa_private_keys(&mut reader).unwrap();
-    if keys.len() != 1 {
-        panic!("expected a single private key");
-    }
+    assert!(keys.len() == 1, "expected a single private key");
 
     rustls::PrivateKey(keys[0].clone())
 }
 
 /// Server response code
-async fn process_request(url: url::Url) -> Response {
+fn process_request(url: &url::Url) -> Response {
     let path = match percent_encoding::percent_decode_str(url.path())
         .decode_utf8_lossy()
         .to_string()
@@ -166,10 +166,10 @@ async fn process_request(url: url::Url) -> Response {
     };
 
     if path == "robots.txt" {
-        return match std::fs::read(".robots.txt") {
-            Ok(bytes) => Response::Success("text/plain".into(), bytes),
-            Err(_) => Response::Success("text/plain".into(), "".into()),
-        };
+        return std::fs::read(".robots.txt").map_or_else(
+            |_error| Response::Success("text/plain".into(), "".into()),
+            |bytes| Response::Success("text/plain".into(), bytes),
+        );
     }
 
     let header = std::fs::read_to_string(".header.gmi").unwrap_or_default();
@@ -179,7 +179,7 @@ async fn process_request(url: url::Url) -> Response {
         Ok(dir) if dir.is_dir() => match std::fs::read_dir(path.clone()) {
             Ok(dir) => {
                 let mut links: Vec<String> = dir
-                    .filter_map(|dir_entry| dir_entry.ok())
+                    .filter_map(std::result::Result::ok)
                     .filter_map(|dir_entry| dir_entry.path().to_str().map(ToString::to_string))
                     .filter_map(|path| {
                         path.split('/')
@@ -218,9 +218,9 @@ async fn process_request(url: url::Url) -> Response {
         Ok(file) if file.is_file() => match std::fs::read(path.clone()) {
             Ok(mut bytes) => {
                 let default_mime: mime::Mime = "text/gemini".parse().unwrap();
-                let mime = mime_guess::from_path(path.clone())
+                let mime = mime_guess::from_path(path)
                     .first()
-                    .unwrap_or(default_mime.clone());
+                    .unwrap_or_else(|| default_mime.clone());
 
                 if mime == default_mime {
                     bytes.push(b'\n');
